@@ -31,8 +31,7 @@ export function MusicSearch() {
 
   const inputRef = useRef(null);
 
-  // Auto-focus on mount
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  // No auto-focus on mount so keyboard doesn't open immediately on mobile
 
   const handleInput = (e) => setQuery(e.target.value);
 

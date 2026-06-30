@@ -6,7 +6,6 @@ import React, {
   useReducer,
   useEffect,
   useRef,
-  useCallback,
   useMemo,
 } from 'react';
 import { musicReducer } from './musicReducer.js';
@@ -19,12 +18,9 @@ import {
   readPreferences,
   writePlayerState,
 } from '../utils/storage.js';
-import { ACTIONS, VIEWS, REPEAT_MODES, DEFAULT_PLAYER_STATE } from '../utils/constants.js';
-
-// ── Initial State ─────────────────────────────────────────────────────────────
+import { ACTIONS, VIEWS, REPEAT_MODES } from '../utils/constants.js';
 
 const initialState = {
-  // Playback
   currentTrack: null,
   isPlaying: false,
   duration: 0,
@@ -33,14 +29,10 @@ const initialState = {
   isMuted: false,
   isShuffled: false,
   repeatMode: REPEAT_MODES.OFF,
-
-  // Queue
   queue: [],
   queueIndex: -1,
   originalQueue: [],
   playingContext: null,
-
-  // UI
   activeView: VIEWS.HOME,
   activePlaylistId: null,
   isMiniPlayer: false,
@@ -48,14 +40,10 @@ const initialState = {
   searchResults: [],
   isSearching: false,
   suggestions: [],
-  toast: null, // { message: string, type: string }
-
-  // Library (loaded from localStorage)
+  toast: null,
   likedSongs: [],
   playlists: [],
   recentlyPlayed: [],
-
-  // Preferences
   preferences: {
     crossfade: false,
     autoplay: true,
@@ -64,20 +52,16 @@ const initialState = {
   },
 };
 
-// ── Contexts ──────────────────────────────────────────────────────────────────
-
 export const MusicStateContext = createContext(null);
 export const MusicDispatchContext = createContext(null);
 export const MusicAudioContext = createContext(null);
 
-// ── Provider ──────────────────────────────────────────────────────────────────
-
 export function MusicProvider({ children }) {
   const [state, dispatch] = useReducer(musicReducer, initialState);
-  const audioRef = useRef(null);
+  const youtubePlayerRef = useRef(null);
   const saveIntervalRef = useRef(null);
 
-  // ── Boot: load persisted data ───────────────────────────────────────────────
+  // ── Boot: load persisted data ──────────────────────────────────────────────
   useEffect(() => {
     initStorage();
 
@@ -113,13 +97,10 @@ export function MusicProvider({ children }) {
   // ── Save playback position every 5s ────────────────────────────────────────
   useEffect(() => {
     saveIntervalRef.current = setInterval(() => {
-      if (audioRef.current && state.currentTrack && !isNaN(audioRef.current.currentTime)) {
-        const time = audioRef.current.currentTime;
+      if (youtubePlayerRef.current && state.currentTrack && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
+        const time = youtubePlayerRef.current.getCurrentTime();
         if (time > 0) {
-          dispatch({
-            type: ACTIONS.SET_CURRENT_TIME,
-            payload: { time },
-          });
+          dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time } });
           writePlayerState({ ...state, currentTime: time });
         }
       }
@@ -130,12 +111,7 @@ export function MusicProvider({ children }) {
   // ── Keyboard shortcuts ──────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e) {
-      // Don't intercept when user is typing
-      if (
-        e.target.tagName === 'INPUT' ||
-        e.target.tagName === 'TEXTAREA' ||
-        e.target.isContentEditable
-      ) return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
 
       if (e.code === 'Space') {
         e.preventDefault();
@@ -143,24 +119,20 @@ export function MusicProvider({ children }) {
         else dispatch({ type: ACTIONS.RESUME });
       } else if (e.code === 'ArrowRight') {
         e.preventDefault();
-        if (audioRef.current) {
-           const t = audioRef.current.currentTime;
-           audioRef.current.currentTime = t + 10;
+        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
+          youtubePlayerRef.current.seekTo(youtubePlayerRef.current.getCurrentTime() + 10, true);
         }
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
-        if (audioRef.current) {
-           const t = audioRef.current.currentTime;
-           audioRef.current.currentTime = Math.max(0, t - 10);
+        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
+          youtubePlayerRef.current.seekTo(Math.max(0, youtubePlayerRef.current.getCurrentTime() - 10), true);
         }
       } else if (e.code === 'ArrowUp') {
         e.preventDefault();
-        const newVol = Math.min(1, (state.volume || 0) + 0.1);
-        dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: newVol } });
+        dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: Math.min(1, (state.volume || 0) + 0.1) } });
       } else if (e.code === 'ArrowDown') {
         e.preventDefault();
-        const newVol = Math.max(0, (state.volume || 0) - 0.1);
-        dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: newVol } });
+        dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: Math.max(0, (state.volume || 0) - 0.1) } });
       }
     }
 
@@ -168,8 +140,7 @@ export function MusicProvider({ children }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [state.isPlaying, state.volume, state.currentTrack]);
 
-  // ── Stable context values ──────────────────────────────────────────────────
-  const audioContextValue = useMemo(() => ({ audioRef }), []);
+  const audioContextValue = useMemo(() => ({ youtubePlayerRef }), []);
 
   return (
     <MusicStateContext.Provider value={state}>
@@ -181,8 +152,6 @@ export function MusicProvider({ children }) {
     </MusicStateContext.Provider>
   );
 }
-
-// ── Hooks ─────────────────────────────────────────────────────────────────────
 
 export function useMusicState() {
   const ctx = useContext(MusicStateContext);

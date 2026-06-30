@@ -179,6 +179,50 @@ export function usePlayer() {
     } catch (err) {}
   }, [isPlaying, playerReady, currentTrack, youtubePlayerRef]);
 
+  // ── 6. Media Session API (Background & Lockscreen Controls) ──────────────────
+  useEffect(() => {
+    if ('mediaSession' in navigator && currentTrack) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.title,
+        artist: currentTrack.artist || currentTrack.channelTitle || 'Unknown Artist',
+        album: 'CEA Music',
+        artwork: [
+          {
+            src: currentTrack.thumbnail || `https://i.ytimg.com/vi/${currentTrack.videoId}/hqdefault.jpg`,
+            sizes: '512x512',
+            type: 'image/jpeg'
+          }
+        ]
+      });
+
+      navigator.mediaSession.setActionHandler('play', () => {
+        dispatch({ type: ACTIONS.RESUME });
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        dispatch({ type: ACTIONS.PAUSE });
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        dispatch({ type: ACTIONS.PREV_TRACK });
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        dispatch({ type: ACTIONS.NEXT_TRACK });
+      });
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.seekTo === 'function') {
+          youtubePlayerRef.current.seekTo(details.seekTime, true);
+          dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: details.seekTime } });
+        }
+      });
+    }
+  }, [currentTrack, dispatch, youtubePlayerRef]);
+
+  // Sync media session playback state
+  useEffect(() => {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    }
+  }, [isPlaying]);
+
   // ── Cleanup on unmount ─────────────────────────────────────────────────────
   useEffect(() => {
     return () => {

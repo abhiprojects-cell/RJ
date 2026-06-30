@@ -2,7 +2,7 @@
 import { Download } from 'lucide-react';
 import { useInstallPrompt } from '../../hooks/useInstallPrompt.js';
 
-export default function InstallButton() {
+export default function InstallButton({ className = '' }) {
   const { canInstall, promptInstall } = useInstallPrompt();
 
   if (!canInstall) return null;
@@ -10,7 +10,7 @@ export default function InstallButton() {
   return (
     <button
       onClick={promptInstall}
-      className="install-pwa-btn"
+      className={`install-pwa-btn ${className}`.trim()}
       title="Install RJ Music as an app"
       aria-label="Install App"
     >

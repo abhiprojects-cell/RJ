@@ -1010,8 +1010,12 @@ h2 { font-size: 24px; letter-spacing: -0.03em; }
 .install-pwa-btn:active {
   transform: translateY(0);
 }
-/* Hide on mobile – Android shows native install prompt / bottom sheet */
+/* Hide the default install button inside the sidebar on mobile */
 @media (max-width: 768px) {
-  .install-pwa-btn { display: none; }
+  .music-sidebar .install-pwa-btn { display: none; }
+}
+/* Hide the mobile-specific install button on desktop */
+@media (min-width: 769px) {
+  .mobile-only-install-btn { display: none !important; }
 }
 

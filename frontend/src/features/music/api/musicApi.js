@@ -123,3 +123,15 @@ export async function fetchStreamUrlWithRetry(youtubeUrl) {
     return await fetchStreamUrl(youtubeUrl);
   }
 }
+
+/**
+ * Get the URL of the backend audio proxy for a given YouTube video ID.
+ * Use this as the `src` of an HTML5 <audio> element — the backend
+ * fetches the actual stream and pipes it back, avoiding CORS.
+ * @param {string} videoId  e.g. "dQw4w9WgXcQ"
+ * @returns {string}  the proxy URL
+ */
+export function getAudioProxyUrl(videoId) {
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  return `${BASE}/audio?url=${encodeURIComponent(youtubeUrl)}`;
+}

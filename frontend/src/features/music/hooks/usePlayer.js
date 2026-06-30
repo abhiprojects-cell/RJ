@@ -3,14 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMusicState, useMusicDispatch, useMusicAudio } from '../context/MusicContext.jsx';
 import { ACTIONS } from '../utils/constants.js';
-import { fetchStreamUrlWithRetry } from '../api/musicApi.js';
+import { getAudioProxyUrl } from '../api/musicApi.js';
 
 export function usePlayer() {
   const state = useMusicState();
   const dispatch = useMusicDispatch();
   const { audioRef } = useMusicAudio();
   const [isBuffering, setIsBuffering] = useState(false);
-  const streamCacheRef = useRef({});
 
   const {
     currentTrack,
@@ -25,55 +24,22 @@ export function usePlayer() {
     queueIndex,
   } = state;
 
-  // ── 1. Load and Play Track via backend stream ────────────────────────────────
+  // ── 1. Load and Play Track via backend audio proxy ───────────────────────────
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrack?.videoId) return;
 
-    let isSubscribed = true;
+    // Build the proxy URL — backend handles all CORS & stream extraction
+    const proxyUrl = getAudioProxyUrl(currentTrack.videoId);
+    audio.src = proxyUrl;
+    audio.load();
 
-    const loadStream = async () => {
-      try {
-        setIsBuffering(true);
-        // Check local cache first so we don't re-fetch if they play the same song again
-        let url = streamCacheRef.current[currentTrack.videoId];
-        
-        if (!url) {
-          const res = await fetchStreamUrlWithRetry(currentTrack.videoId);
-          url = res.audioUrl;
-          streamCacheRef.current[currentTrack.videoId] = url;
-        }
-
-        if (!isSubscribed) return;
-
-        // Only set src if it's different to prevent resetting playback
-        if (audio.src !== url) {
-          audio.src = url;
-          audio.load();
-        }
-
-        if (isPlaying) {
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise.catch(err => console.error('[usePlayer] Auto-play prevented or failed:', err));
-          }
-        }
-      } catch (err) {
-        console.error('[usePlayer] Failed to load stream:', err);
-        if (isSubscribed) {
-          // Auto-skip on error after a brief delay
-          setTimeout(() => dispatch({ type: ACTIONS.NEXT_TRACK }), 1500);
-        }
-      } finally {
-        if (isSubscribed) setIsBuffering(false);
+    if (isPlaying) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(err => console.error('[usePlayer] Auto-play prevented:', err));
       }
-    };
-
-    loadStream();
-
-    return () => {
-      isSubscribed = false;
-    };
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack?.videoId]);
 

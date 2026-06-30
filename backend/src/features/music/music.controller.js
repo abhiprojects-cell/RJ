@@ -156,3 +156,73 @@ export async function related(req, res) {
     sendError(res, err);
   }
 }
+
+// ── GET /api/music/audio?url=<youtubeUrl> ────────────────────────────────────
+// Proxies the raw audio stream through the backend to avoid browser CORS issues.
+
+export async function audio(req, res) {
+  try {
+    const raw = req.query.url;
+    if (!raw) throw new InvalidInputError('Query parameter "url" is required');
+
+    const url = sanitizeYouTubeUrl(raw);
+
+    // Get (or cache) the upstream audio URL
+    const cacheKey = `stream:${url}`;
+    const streamInfo = await streamCache.getOrFetch(
+      cacheKey,
+      () => getStreamUrl(url),
+      5 * 60 * 1000,
+    );
+
+    const { audioUrl, format } = streamInfo;
+    if (!audioUrl) throw new Error('No audio URL resolved');
+
+    // Forward Range header so browsers can seek
+    const rangeHeader = req.headers['range'];
+    const upstreamHeaders = {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': '*/*',
+    };
+    if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+    // Pipe the upstream audio through to the client
+    const upstreamRes = await fetch(audioUrl, { headers: upstreamHeaders });
+
+    if (!upstreamRes.ok && upstreamRes.status !== 206) {
+      throw new Error(`Upstream audio fetch failed: ${upstreamRes.status}`);
+    }
+
+    // Set appropriate response headers
+    const status = rangeHeader && upstreamRes.status === 206 ? 206 : 200;
+    res.status(status);
+    res.setHeader('Content-Type', format || 'audio/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+
+    const contentLength = upstreamRes.headers.get('content-length');
+    const contentRange = upstreamRes.headers.get('content-range');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+
+    // Stream the body
+    const reader = upstreamRes.body.getReader();
+    const pump = async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) { res.end(); break; }
+        const ok = res.write(Buffer.from(value));
+        if (!ok) {
+          // Handle backpressure
+          await new Promise(resolve => res.once('drain', resolve));
+        }
+      }
+    };
+
+    req.on('close', () => reader.cancel());
+    await pump();
+
+  } catch (err) {
+    sendError(res, err);
+  }
+}

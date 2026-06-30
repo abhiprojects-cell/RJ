@@ -1,7 +1,7 @@
 // music.routes.js — All Express route definitions for /api/music
 
 import { Router } from 'express';
-import { search, stream, trending, suggest, info, related } from './music.controller.js';
+import { search, stream, trending, suggest, info, related, audio } from './music.controller.js';
 
 const router = Router();
 
@@ -28,6 +28,12 @@ router.get('/suggest', suggest);
  * Get a direct audio stream URL for a YouTube track
  */
 router.get('/stream', stream);
+
+/**
+ * GET /api/music/audio?url=<youtubeUrl>
+ * Proxy the audio stream directly through the backend (avoids CORS)
+ */
+router.get('/audio', audio);
 
 /**
  * GET /api/music/info?url=<youtubeUrl>

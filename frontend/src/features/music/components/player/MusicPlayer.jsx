@@ -9,7 +9,7 @@ import { TrackContextMenu } from '../shared/TrackContextMenu.jsx';
 import { ACTIONS } from '../../utils/constants.js';
 
 export function MusicPlayer() {
-  const { youtubePlayerRef } = useMusicAudio();
+  const { audioRef } = useMusicAudio();
   const dispatch = useMusicDispatch();
   const { currentTrack, isPlaying, togglePlay, next, prev } = usePlayer();
   const { toggle, isLiked } = useLikedSongs();
@@ -85,8 +85,8 @@ export function MusicPlayer() {
 
   return (
     <>
-      {/* Hidden YouTube player element */}
-      <div id="youtube-player" style={{ display: 'none', position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} />
+      {/* Hidden HTML5 audio element */}
+      <audio ref={audioRef} style={{ display: 'none' }} playsInline preload="auto" />
 
       {/* ── FULLSCREEN PLAYER ── */}
       {isExpanded && currentTrack && (

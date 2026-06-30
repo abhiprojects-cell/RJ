@@ -74,7 +74,7 @@ export const MusicAudioContext = createContext(null);
 
 export function MusicProvider({ children }) {
   const [state, dispatch] = useReducer(musicReducer, initialState);
-  const youtubePlayerRef = useRef(null);
+  const audioRef = useRef(null);
   const saveIntervalRef = useRef(null);
 
   // ── Boot: load persisted data ───────────────────────────────────────────────
@@ -113,8 +113,8 @@ export function MusicProvider({ children }) {
   // ── Save playback position every 5s ────────────────────────────────────────
   useEffect(() => {
     saveIntervalRef.current = setInterval(() => {
-      if (youtubePlayerRef.current && state.currentTrack && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
-        const time = youtubePlayerRef.current.getCurrentTime();
+      if (audioRef.current && state.currentTrack && !isNaN(audioRef.current.currentTime)) {
+        const time = audioRef.current.currentTime;
         if (time > 0) {
           dispatch({
             type: ACTIONS.SET_CURRENT_TIME,
@@ -143,15 +143,15 @@ export function MusicProvider({ children }) {
         else dispatch({ type: ACTIONS.RESUME });
       } else if (e.code === 'ArrowRight') {
         e.preventDefault();
-        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
-           const t = youtubePlayerRef.current.getCurrentTime();
-           youtubePlayerRef.current.seekTo(t + 10, true);
+        if (audioRef.current) {
+           const t = audioRef.current.currentTime;
+           audioRef.current.currentTime = t + 10;
         }
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
-        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
-           const t = youtubePlayerRef.current.getCurrentTime();
-           youtubePlayerRef.current.seekTo(Math.max(0, t - 10), true);
+        if (audioRef.current) {
+           const t = audioRef.current.currentTime;
+           audioRef.current.currentTime = Math.max(0, t - 10);
         }
       } else if (e.code === 'ArrowUp') {
         e.preventDefault();
@@ -169,7 +169,7 @@ export function MusicProvider({ children }) {
   }, [state.isPlaying, state.volume, state.currentTrack]);
 
   // ── Stable context values ──────────────────────────────────────────────────
-  const audioContextValue = useMemo(() => ({ youtubePlayerRef }), []);
+  const audioContextValue = useMemo(() => ({ audioRef }), []);
 
   return (
     <MusicStateContext.Provider value={state}>

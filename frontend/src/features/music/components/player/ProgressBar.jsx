@@ -5,7 +5,7 @@ import { formatDuration } from '../../utils/formatters.js';
 
 export function ProgressBar({ mini = false }) {
   const { currentTime, duration, currentTrack } = usePlayer();
-  const { youtubePlayerRef } = useMusicAudio();
+  const { audioRef } = useMusicAudio();
   const progressRef = useRef(null);
   
   const [isDragging, setIsDragging] = useState(false);
@@ -33,17 +33,15 @@ export function ProgressBar({ mini = false }) {
 
   const handleDragEnd = useCallback(
     (e) => {
-      if (!isDragging || !duration || !youtubePlayerRef.current) {
+      if (!isDragging || !duration || !audioRef.current) {
         setIsDragging(false);
         return;
       }
       const newTime = calculateTimeFromEvent(e.changedTouches ? e.changedTouches[0] : e);
-      if (typeof youtubePlayerRef.current.seekTo === 'function') {
-        youtubePlayerRef.current.seekTo(newTime, true);
-      }
+      audioRef.current.currentTime = newTime;
       setIsDragging(false);
     },
-    [isDragging, duration, youtubePlayerRef]
+    [isDragging, duration, audioRef]
   );
 
   useEffect(() => {

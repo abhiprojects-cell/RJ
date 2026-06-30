@@ -1,15 +1,16 @@
-// usePlayer.js — Playback controls via YouTube IFrame API
+// usePlayer.js — Playback controls via HTML5 Audio and Backend Streams
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMusicState, useMusicDispatch, useMusicAudio } from '../context/MusicContext.jsx';
 import { ACTIONS } from '../utils/constants.js';
+import { fetchStreamUrlWithRetry } from '../api/musicApi.js';
 
 export function usePlayer() {
   const state = useMusicState();
   const dispatch = useMusicDispatch();
-  const { youtubePlayerRef } = useMusicAudio();
-  const timeUpdateIntervalRef = useRef(null);
-  const [playerReady, setPlayerReady] = useState(false);
+  const { audioRef } = useMusicAudio();
+  const [isBuffering, setIsBuffering] = useState(false);
+  const streamCacheRef = useRef({});
 
   const {
     currentTrack,
@@ -24,162 +25,141 @@ export function usePlayer() {
     queueIndex,
   } = state;
 
-  // ── 1. Initialize YouTube IFrame API ─────────────────────────────────────────
+  // ── 1. Load and Play Track via backend stream ────────────────────────────────
   useEffect(() => {
-    // If already loaded or loading, do nothing
-    if (window.YT && window.YT.Player) {
-      if (!youtubePlayerRef.current) initPlayer();
-      return;
-    }
+    const audio = audioRef.current;
+    if (!audio || !currentTrack?.videoId) return;
 
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    const firstScriptTag = document.getElementsByTagName('script')[0];
-    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    let isSubscribed = true;
 
-    window.onYouTubeIframeAPIReady = () => {
-      initPlayer();
-    };
-
-    function initPlayer() {
-      // Must wait for the DOM element 'youtube-player' to exist
-      let checkExist = null;
-      const checkFn = () => {
-        if (document.getElementById('youtube-player')) {
-          if (checkExist) clearInterval(checkExist);
-          checkExist = null;
-          
-          youtubePlayerRef.current = new window.YT.Player('youtube-player', {
-            height: '0',
-            width: '0',
-            playerVars: {
-              autoplay: 0,
-              controls: 0,
-              disablekb: 1,
-              fs: 0,
-              modestbranding: 1,
-              playsinline: 1,
-            },
-            events: {
-              onReady: (event) => {
-                setPlayerReady(true);
-                // Apply initial volume
-                event.target.setVolume(isMuted ? 0 : volume * 100);
-              },
-              onStateChange: onPlayerStateChange,
-              onError: onPlayerError,
-            },
-          });
+    const loadStream = async () => {
+      try {
+        setIsBuffering(true);
+        // Check local cache first so we don't re-fetch if they play the same song again
+        let url = streamCacheRef.current[currentTrack.videoId];
+        
+        if (!url) {
+          const res = await fetchStreamUrlWithRetry(currentTrack.videoId);
+          url = res.audioUrl;
+          streamCacheRef.current[currentTrack.videoId] = url;
         }
-      };
-      checkExist = setInterval(checkFn, 100);
-      return () => {
-        if (checkExist) clearInterval(checkExist);
-      };
-    }
 
-    return () => {
-      // Cleanup if component unmounts entirely
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+        if (!isSubscribed) return;
 
-  // ── 2. Handle YouTube Player Events ──────────────────────────────────────────
-  
-  const onPlayerStateChange = useCallback((event) => {
-    const YT = window.YT;
-    if (!YT) return;
+        // Only set src if it's different to prevent resetting playback
+        if (audio.src !== url) {
+          audio.src = url;
+          audio.load();
+        }
 
-    if (event.data === YT.PlayerState.PLAYING) {
-      // Ensure sync
-      if (!state.isPlaying) {
-         // dispatch({ type: ACTIONS.RESUME }); // Can cause loops, usually we trust our own state
-      }
-      
-      // Get duration once it starts playing
-      const dur = event.target.getDuration();
-      if (dur && dur !== state.duration) {
-        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: dur } });
-      }
-
-      // Start timeupdate polling
-      clearInterval(timeUpdateIntervalRef.current);
-      timeUpdateIntervalRef.current = setInterval(() => {
-        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
-          dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: youtubePlayerRef.current.getCurrentTime() } });
-          
-          const currentDur = youtubePlayerRef.current.getDuration();
-          if (currentDur) {
-            dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: currentDur } });
+        if (isPlaying) {
+          const playPromise = audio.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(err => console.error('[usePlayer] Auto-play prevented or failed:', err));
           }
         }
-      }, 500);
+      } catch (err) {
+        console.error('[usePlayer] Failed to load stream:', err);
+        if (isSubscribed) {
+          // Auto-skip on error after a brief delay
+          setTimeout(() => dispatch({ type: ACTIONS.NEXT_TRACK }), 1500);
+        }
+      } finally {
+        if (isSubscribed) setIsBuffering(false);
+      }
+    };
 
-    } else if (event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.BUFFERING) {
-      clearInterval(timeUpdateIntervalRef.current);
-    } else if (event.data === YT.PlayerState.ENDED) {
-      clearInterval(timeUpdateIntervalRef.current);
-      dispatch({ type: ACTIONS.NEXT_TRACK });
+    loadStream();
+
+    return () => {
+      isSubscribed = false;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.videoId]);
+
+  // ── 2. Sync Play/Pause state ─────────────────────────────────────────────────
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !audio.src) return;
+
+    if (isPlaying && audio.paused) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(err => {
+          console.error('[usePlayer] Play prevented:', err);
+          dispatch({ type: ACTIONS.PAUSE });
+        });
+      }
+    } else if (!isPlaying && !audio.paused) {
+      audio.pause();
     }
-  }, [state.isPlaying, state.duration, dispatch, youtubePlayerRef]);
-
-  const onPlayerError = useCallback((event) => {
-    console.error('[usePlayer] YouTube Player Error:', event.data);
-    // Auto-skip on error
-    setTimeout(() => {
-      dispatch({ type: ACTIONS.NEXT_TRACK });
-    }, 1500);
-  }, [dispatch]);
+  }, [isPlaying, audioRef]);
 
   // ── 3. Sync Volume and Mute ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current) return;
-    try {
-      if (isMuted) {
-        youtubePlayerRef.current.mute();
-      } else {
-        youtubePlayerRef.current.unMute();
-        youtubePlayerRef.current.setVolume(volume * 100);
-      }
-    } catch (err) {}
-  }, [volume, isMuted, playerReady, youtubePlayerRef]);
-
-  // ── 4. Load and Play Track ───────────────────────────────────────────────────
-  useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
-
-    try {
-      const player = youtubePlayerRef.current;
-      // Load video by ID
-      if (isPlaying) {
-        player.loadVideoById(currentTrack.videoId, state.currentTime > 0 ? state.currentTime : 0);
-      } else {
-        player.cueVideoById(currentTrack.videoId, state.currentTime > 0 ? state.currentTime : 0);
-      }
-    } catch (err) {
-      console.error('[usePlayer] Failed to load video:', err);
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+      audioRef.current.muted = isMuted;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.videoId, playerReady]);
+  }, [volume, isMuted, audioRef]);
 
-  // ── 5. Sync Play/Pause state ─────────────────────────────────────────────────
+  // ── 4. HTML5 Audio Event Listeners ───────────────────────────────────────────
   useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
-    
-    try {
-      const player = youtubePlayerRef.current;
-      const playerState = player.getPlayerState ? player.getPlayerState() : -1;
-      const YT = window.YT;
-      
-      if (isPlaying && playerState !== YT?.PlayerState.PLAYING && playerState !== YT?.PlayerState.BUFFERING) {
-        player.playVideo();
-      } else if (!isPlaying && playerState === YT?.PlayerState.PLAYING) {
-        player.pauseVideo();
-      }
-    } catch (err) {}
-  }, [isPlaying, playerReady, currentTrack, youtubePlayerRef]);
+    const audio = audioRef.current;
+    if (!audio) return;
 
-  // ── 6. Media Session API (Background & Lockscreen Controls) ──────────────────
+    const onTimeUpdate = () => {
+      dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: audio.currentTime } });
+    };
+
+    const onDurationChange = () => {
+      if (audio.duration && !isNaN(audio.duration)) {
+        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audio.duration } });
+      }
+    };
+
+    const onEnded = () => {
+      dispatch({ type: ACTIONS.NEXT_TRACK });
+    };
+
+    const onPlay = () => {
+      if (!state.isPlaying) dispatch({ type: ACTIONS.RESUME });
+    };
+
+    const onPause = () => {
+      if (state.isPlaying) dispatch({ type: ACTIONS.PAUSE });
+    };
+
+    const onWaiting = () => setIsBuffering(true);
+    const onPlaying = () => setIsBuffering(false);
+    
+    const onError = (e) => {
+      console.error('[usePlayer] HTML5 Audio Error:', e);
+      setTimeout(() => dispatch({ type: ACTIONS.NEXT_TRACK }), 1500);
+    };
+
+    audio.addEventListener('timeupdate', onTimeUpdate);
+    audio.addEventListener('durationchange', onDurationChange);
+    audio.addEventListener('ended', onEnded);
+    audio.addEventListener('play', onPlay);
+    audio.addEventListener('pause', onPause);
+    audio.addEventListener('waiting', onWaiting);
+    audio.addEventListener('playing', onPlaying);
+    audio.addEventListener('error', onError);
+
+    return () => {
+      audio.removeEventListener('timeupdate', onTimeUpdate);
+      audio.removeEventListener('durationchange', onDurationChange);
+      audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('play', onPlay);
+      audio.removeEventListener('pause', onPause);
+      audio.removeEventListener('waiting', onWaiting);
+      audio.removeEventListener('playing', onPlaying);
+      audio.removeEventListener('error', onError);
+    };
+  }, [audioRef, dispatch, state.isPlaying]);
+
+  // ── 5. Media Session API (Background & Lockscreen Controls) ──────────────────
   useEffect(() => {
     if ('mediaSession' in navigator && currentTrack) {
       navigator.mediaSession.metadata = new MediaMetadata({
@@ -208,13 +188,13 @@ export function usePlayer() {
         dispatch({ type: ACTIONS.NEXT_TRACK });
       });
       navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.seekTo === 'function') {
-          youtubePlayerRef.current.seekTo(details.seekTime, true);
+        if (audioRef.current) {
+          audioRef.current.currentTime = details.seekTime;
           dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: details.seekTime } });
         }
       });
     }
-  }, [currentTrack, dispatch, youtubePlayerRef]);
+  }, [currentTrack, dispatch, audioRef]);
 
   // Sync media session playback state
   useEffect(() => {
@@ -222,13 +202,6 @@ export function usePlayer() {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
   }, [isPlaying]);
-
-  // ── Cleanup on unmount ─────────────────────────────────────────────────────
-  useEffect(() => {
-    return () => {
-      clearInterval(timeUpdateIntervalRef.current);
-    };
-  }, []);
 
   // ── Controls ───────────────────────────────────────────────────────────────
 
@@ -250,11 +223,11 @@ export function usePlayer() {
   }, [isPlaying, dispatch]);
 
   const seek = useCallback((time) => {
-    if (youtubePlayerRef.current && typeof youtubePlayerRef.current.seekTo === 'function') {
-      youtubePlayerRef.current.seekTo(time, true);
+    if (audioRef.current) {
+      audioRef.current.currentTime = time;
     }
     dispatch({ type: ACTIONS.SEEK, payload: { time } });
-  }, [youtubePlayerRef, dispatch]);
+  }, [audioRef, dispatch]);
 
   const setVolume = useCallback((vol) => {
     dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: Math.max(0, Math.min(1, vol)) } });
@@ -298,6 +271,7 @@ export function usePlayer() {
     duration,
     queue,
     queueIndex,
+    isBuffering,
     play,
     pause,
     resume,

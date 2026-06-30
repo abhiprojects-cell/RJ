@@ -106,9 +106,8 @@ export const LIMITS = {
 };
 
 // ── API Base URL ─────────────────────────────────────────────────────────────
-// Always use the Render backend — frontend is on Vercel, backend on Render.
-// This means local dev also hits the live Render backend (no local backend needed).
-export const BACKEND_URL = 'http://localhost:5000';
+// Use the Render backend URL for all API calls.
+export const BACKEND_URL = 'https://rj-cr26.onrender.com';
 
 export const API_BASE = `${BACKEND_URL}/api/music`;
 

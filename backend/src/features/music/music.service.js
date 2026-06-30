@@ -1,17 +1,14 @@
-// music.service.js — Search, Info, and Suggestions (Playback handled on frontend via IFrame API)
+// music.service.js — Search, Info, Suggestions, and yt-dlp audio extraction
 import { request as httpsRequest } from 'https';
 import { TimeoutError, NotFoundError, MusicError, MusicErrorCodes } from './music.errors.js';
 import ytsr from 'ytsr';
-import ytdl from '@distube/ytdl-core';
+import youtubeDlExec from 'youtube-dl-exec';
 
-// ── Providers ────────────────────────────────────────────────────────────────
-
-const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-  'https://piped-api.garudalinux.org',
-  'https://pipedapi.colinslegacy.com',
-];
+// ── In-memory URL cache (TTL: 4 hours) ──────────────────────────────────────
+// yt-dlp URLs are IP-locked but valid for several hours from the Render server.
+// Caching avoids the slow subprocess call on every request.
+const streamUrlCache = new Map(); // videoId -> { audioUrl, format, cachedAt }
+const STREAM_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +28,45 @@ async function safeFetch(url, timeoutMs = 10000) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
   return res.json();
+}
+
+// ── yt-dlp extraction (same-IP extraction + delivery) ────────────────────────
+// Runs yt-dlp on the Render server to get the direct audio URL.
+// Because both extraction (yt-dlp) and byte delivery (/audio proxy) run from
+// the same machine, there is no IP mismatch and YouTube cannot 403 us.
+async function extractWithYtDlp(videoId) {
+  // Check cache first
+  const cached = streamUrlCache.get(videoId);
+  if (cached && (Date.now() - cached.cachedAt) < STREAM_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // youtube-dl-exec shells out to the bundled yt-dlp binary.
+  // -g / --get-url prints only the direct stream URL — fast and no download.
+  const rawUrl = await youtubeDlExec(youtubeUrl, {
+    getUrl: true,
+    format: 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
+    noCheckCertificates: true,
+    noWarnings: true,
+    preferFreeFormats: true,
+    addHeaders: ['referer:youtube.com', 'user-agent:Mozilla/5.0'],
+  });
+
+  // youtube-dl-exec may return newline-separated URLs when multiple formats match;
+  // take the first non-empty line.
+  const audioUrl = (typeof rawUrl === 'string' ? rawUrl.split('\n')[0] : '').trim();
+  if (!audioUrl) throw new MusicError('yt-dlp returned no URL', MusicErrorCodes.STREAM_FAILED, 502);
+
+  const result = {
+    audioUrl,
+    format: 'audio/webm',
+    cachedAt: Date.now(),
+  };
+
+  streamUrlCache.set(videoId, result);
+  return result;
 }
 
 
@@ -143,41 +179,13 @@ export async function getStreamUrl(youtubeUrl) {
   const videoId = extractVideoId(youtubeUrl.replace(/"/g, ''));
   if (!videoId) throw new MusicError('Invalid YouTube URL', MusicErrorCodes.INVALID_INPUT, 400);
 
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
-
-  // Try Piped audio stream first
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      const data = await safeFetch(`${instance}/streams/${videoId}`);
-      const audioStreams = (data.streams || []).filter((s) => s.type?.startsWith('audio'));
-      if (audioStreams.length) {
-        const best = audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-        return {
-          audioUrl: best.url || best.streamUrl || best.link,
-          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-          format: best.mimeType || best.format || 'audio/mp4',
-          bitrate: best.bitrate || best.audioBitrate || null,
-        };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  // Fallback to ytdl-core when Piped doesn't return a usable audio stream
-  const info = await ytdl.getInfo(url).catch((e) => {
-    throw new MusicError(e.message, MusicErrorCodes.INTERNAL_ERROR, 500);
-  });
-  const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
-  if (!format?.url) {
-    throw new MusicError('Unable to resolve audio stream URL', MusicErrorCodes.STREAM_FAILED, 502);
-  }
+  const { audioUrl, format } = await extractWithYtDlp(videoId);
 
   return {
-    audioUrl: format.url,
-    expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-    format: format.mimeType || format.container || 'audio/mp4',
-    bitrate: format.bitrate || format.audioBitrate || null,
+    audioUrl,
+    expiresAt: new Date(Date.now() + STREAM_CACHE_TTL_MS).toISOString(),
+    format,
+    bitrate: null,
   };
 }
 export async function getRelated(videoId, title, artist) {

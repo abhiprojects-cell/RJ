@@ -4,23 +4,25 @@ import musicRoutes from './features/music/music.routes.js';
 
 const app = express();
 
-// Allowed origins: always include the production Vercel URL.
-// Add ALLOWED_ORIGIN env var on Render (comma-separated) to extend this list.
-const allowedOrigins = [
-  'https://rjmusic.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:3000',
-  ...(process.env.ALLOWED_ORIGIN
-    ? process.env.ALLOWED_ORIGIN.split(',').map((o) => o.trim())
-    : []),
-];
+// Allow all *.vercel.app subdomains (covers all preview + production deployments)
+// and localhost for local dev. Extra origins can be added via ALLOWED_ORIGIN env var.
+const extraOrigins = process.env.ALLOWED_ORIGIN
+  ? process.env.ALLOWED_ORIGIN.split(',').map((o) => o.trim())
+  : [];
+
+function isOriginAllowed(origin) {
+  if (!origin) return true; // curl, Render health checks, mobile apps
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin)) return true;
+  if (origin === 'http://localhost:5173') return true;
+  if (origin === 'http://localhost:3000') return true;
+  if (extraOrigins.includes(origin)) return true;
+  return false;
+}
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, Render health checks)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isOriginAllowed(origin)) return callback(null, true);
       callback(new Error(`CORS: origin "${origin}" is not allowed`));
     },
     methods: ['GET', 'OPTIONS'],

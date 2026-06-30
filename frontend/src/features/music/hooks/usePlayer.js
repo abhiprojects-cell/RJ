@@ -7,6 +7,19 @@ import { useMusicState, useMusicDispatch, useMusicAudio } from '../context/Music
 import { ACTIONS } from '../utils/constants.js';
 import { getAudioProxyUrl } from '../api/musicApi.js';
 
+// ── Singleton Audio Element ───────────────────────────────────────────────────
+// We use a single persistent audio element to satisfy mobile browser autoplay policies.
+// Recreating the element per-track causes iOS/Android to block playback.
+const audioEl = document.createElement('audio');
+audioEl.preload = 'auto';
+audioEl.playsInline = true;
+audioEl.setAttribute('webkit-playsinline', 'true');
+// We do not append to body immediately here just in case SSR, but since this is React CSR, it's fine.
+if (typeof window !== 'undefined' && !document.getElementById('cea-native-audio')) {
+  audioEl.id = 'cea-native-audio';
+  document.body.appendChild(audioEl);
+}
+
 export function usePlayer() {
   const state = useMusicState();
   const dispatch = useMusicDispatch();
@@ -26,68 +39,69 @@ export function usePlayer() {
     queueIndex,
   } = state;
 
-  // ── 1. Create / swap the native <audio> element on track change ──────────────
-  // We create a new audio element per track so there is no stale-src race condition.
-  // The element is appended to <body> so the browser keeps it alive across renders.
+  // ── 1. Setup Singleton Audio & Listeners ─────────────────────────────────────
+  useEffect(() => {
+    // Expose API
+    const playerApi = {
+      seekTo:         (t) => { audioEl.currentTime = Math.max(0, Number(t) || 0); },
+      getCurrentTime: () => audioEl.currentTime || 0,
+      getDuration:    () => audioEl.duration || 0,
+      mute:           () => { audioEl.muted = true; },
+      unMute:         () => { audioEl.muted = false; },
+      setVolume:      (v) => { audioEl.volume = Math.max(0, Math.min(1, v > 1 ? v / 100 : v)); },
+      play:           () => audioEl.play(),
+      pause:          () => audioEl.pause(),
+      getPlayerState: () => audioEl.ended ? 0 : audioEl.paused ? 2 : 1,
+    };
+    youtubePlayerRef.current = playerApi;
+
+    const onTimeUpdate    = () => dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: audioEl.currentTime || 0 } });
+    const onDuration      = () => { if (audioEl.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audioEl.duration } }); };
+    const onLoadedMeta    = () => { setPlayerReady(true); if (audioEl.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audioEl.duration } }); };
+    const onCanPlay       = () => setPlayerReady(true);
+    const onEnded         = () => dispatch({ type: ACTIONS.NEXT_TRACK });
+    const onError         = (e) => { 
+      // Ignored if src is empty
+      if (!audioEl.src || audioEl.src.endsWith('undefined')) return;
+      console.error('[usePlayer] audio error', e); 
+      dispatch({ type: ACTIONS.NEXT_TRACK }); 
+    };
+
+    audioEl.addEventListener('timeupdate',     onTimeUpdate);
+    audioEl.addEventListener('durationchange', onDuration);
+    audioEl.addEventListener('loadedmetadata', onLoadedMeta);
+    audioEl.addEventListener('canplay',        onCanPlay);
+    audioEl.addEventListener('ended',          onEnded);
+    audioEl.addEventListener('error',          onError);
+
+    return () => {
+      audioEl.removeEventListener('timeupdate',     onTimeUpdate);
+      audioEl.removeEventListener('durationchange', onDuration);
+      audioEl.removeEventListener('loadedmetadata', onLoadedMeta);
+      audioEl.removeEventListener('canplay',        onCanPlay);
+      audioEl.removeEventListener('ended',          onEnded);
+      audioEl.removeEventListener('error',          onError);
+      if (youtubePlayerRef.current === playerApi) youtubePlayerRef.current = null;
+    };
+  }, [dispatch, youtubePlayerRef]);
+
+  // ── 1.5. Update src on track change ──────────────────────────────────────────
   useEffect(() => {
     if (!currentTrack?.videoId) {
       setPlayerReady(false);
+      audioEl.removeAttribute('src');
+      audioEl.load();
       return;
     }
 
-    const audio = document.createElement('audio');
-    audio.preload = 'auto';
-    // These two attributes allow audio to play inline on iOS without fullscreening
-    audio.playsInline = true;
-    audio.setAttribute('webkit-playsinline', 'true');
-
-    // Build the proxy URL: /api/music/audio?url=<encodedYouTubeUrl>
-    // The backend runs yt-dlp (same IP) and pipes the bytes back with Range support.
-    audio.src = getAudioProxyUrl(currentTrack.videoId);
-
-    // Expose the same API surface the rest of the app already uses via youtubePlayerRef
-    const playerApi = {
-      seekTo:         (t) => { audio.currentTime = Math.max(0, Number(t) || 0); },
-      getCurrentTime: () => audio.currentTime || 0,
-      getDuration:    () => audio.duration || 0,
-      mute:           () => { audio.muted = true; },
-      unMute:         () => { audio.muted = false; },
-      setVolume:      (v) => { audio.volume = Math.max(0, Math.min(1, v > 1 ? v / 100 : v)); },
-      play:           () => audio.play(),
-      pause:          () => audio.pause(),
-      getPlayerState: () => audio.ended ? 0 : audio.paused ? 2 : 1,
-    };
-
-    const onTimeUpdate    = () => dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: audio.currentTime || 0 } });
-    const onDuration      = () => { if (audio.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audio.duration } }); };
-    const onLoadedMeta    = () => { setPlayerReady(true); if (audio.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audio.duration } }); };
-    const onCanPlay       = () => setPlayerReady(true);
-    const onEnded         = () => dispatch({ type: ACTIONS.NEXT_TRACK });
-    // On error: skip to next track after a short delay
-    const onError         = (e) => { console.error('[usePlayer] audio error', e); dispatch({ type: ACTIONS.NEXT_TRACK }); };
-
-    audio.addEventListener('timeupdate',     onTimeUpdate);
-    audio.addEventListener('durationchange', onDuration);
-    audio.addEventListener('loadedmetadata', onLoadedMeta);
-    audio.addEventListener('canplay',        onCanPlay);
-    audio.addEventListener('ended',          onEnded);
-    audio.addEventListener('error',          onError);
-
-    document.body.appendChild(audio);
-    youtubePlayerRef.current = playerApi;
-    audio.load();
-
-    return () => {
-      audio.pause();
-      audio.removeEventListener('timeupdate',     onTimeUpdate);
-      audio.removeEventListener('durationchange', onDuration);
-      audio.removeEventListener('loadedmetadata', onLoadedMeta);
-      audio.removeEventListener('canplay',        onCanPlay);
-      audio.removeEventListener('ended',          onEnded);
-      audio.removeEventListener('error',          onError);
-      audio.remove();
-      if (youtubePlayerRef.current === playerApi) youtubePlayerRef.current = null;
-    };
+    setPlayerReady(false);
+    audioEl.src = getAudioProxyUrl(currentTrack.videoId);
+    audioEl.load();
+    
+    if (isPlaying) {
+      const p = audioEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack?.videoId]);
 
@@ -110,12 +124,20 @@ export function usePlayer() {
     try {
       if (isPlaying) {
         const p = youtubePlayerRef.current.play();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
+        if (p && typeof p.catch === 'function') {
+          p.catch((err) => {
+             console.warn('Playback prevented:', err);
+             // If browser blocked it, we must pause state visually
+             if (err.name === 'NotAllowedError') {
+                dispatch({ type: ACTIONS.PAUSE });
+             }
+          });
+        }
       } else {
         youtubePlayerRef.current.pause();
       }
     } catch (_) {}
-  }, [isPlaying, playerReady, currentTrack?.videoId, youtubePlayerRef]);
+  }, [isPlaying, playerReady, currentTrack?.videoId, youtubePlayerRef, dispatch]);
 
   // ── 4. MediaSession API (lock-screen / notification controls) ─────────────────
   useEffect(() => {
@@ -155,15 +177,34 @@ export function usePlayer() {
 
   // ── Controls (dispatch to reducer; effects above react and drive the audio) ───
   const play = useCallback((track, queue, queueIndex, context) => {
+    // Attempt to unlock audio synchronously on user interaction
+    if (audioEl.paused) {
+      const p = audioEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
     dispatch({ type: ACTIONS.PLAY_TRACK, payload: { track, queue, queueIndex, context } });
   }, [dispatch]);
 
-  const pause = useCallback(() => dispatch({ type: ACTIONS.PAUSE }), [dispatch]);
-  const resume = useCallback(() => dispatch({ type: ACTIONS.RESUME }), [dispatch]);
+  const pause = useCallback(() => {
+    audioEl.pause();
+    dispatch({ type: ACTIONS.PAUSE });
+  }, [dispatch]);
+
+  const resume = useCallback(() => {
+    const p = audioEl.play();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+    dispatch({ type: ACTIONS.RESUME });
+  }, [dispatch]);
 
   const togglePlay = useCallback(() => {
-    if (isPlaying) dispatch({ type: ACTIONS.PAUSE });
-    else           dispatch({ type: ACTIONS.RESUME });
+    if (isPlaying) {
+      audioEl.pause();
+      dispatch({ type: ACTIONS.PAUSE });
+    } else {
+      const p = audioEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      dispatch({ type: ACTIONS.RESUME });
+    }
   }, [isPlaying, dispatch]);
 
   const seek = useCallback((time) => {

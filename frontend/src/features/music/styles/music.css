@@ -980,3 +980,38 @@ h2 { font-size: 24px; letter-spacing: -0.03em; }
   .music-recent-grid { gap: 6px; }
   .music-recent-pill img { width: 48px; height: 48px; }
 }
+
+/* ── PWA Install Button ───────────────────────────────────────────────────────── */
+.install-pwa-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  margin-top: 10px;
+  background: transparent;
+  border: 1px solid var(--music-accent);
+  border-radius: var(--music-radius-pill);
+  color: var(--music-accent);
+  font-family: var(--music-font);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--music-transition), color var(--music-transition),
+    transform var(--music-transition), box-shadow var(--music-transition);
+  white-space: nowrap;
+}
+.install-pwa-btn:hover {
+  background: var(--music-accent);
+  color: #000;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(29, 185, 84, 0.35);
+}
+.install-pwa-btn:active {
+  transform: translateY(0);
+}
+/* Hide on mobile – Android shows native install prompt / bottom sheet */
+@media (max-width: 768px) {
+  .install-pwa-btn { display: none; }
+}
+

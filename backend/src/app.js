@@ -4,11 +4,16 @@ import musicRoutes from './features/music/music.routes.js';
 
 const app = express();
 
-// Allow requests from Vercel frontend (set ALLOWED_ORIGIN env var on Render)
-// Falls back to allowing all origins in dev if the env var is not set.
-const allowedOrigins = process.env.ALLOWED_ORIGIN
-  ? process.env.ALLOWED_ORIGIN.split(',').map((o) => o.trim())
-  : ['http://localhost:5173', 'http://localhost:3000'];
+// Allowed origins: always include the production Vercel URL.
+// Add ALLOWED_ORIGIN env var on Render (comma-separated) to extend this list.
+const allowedOrigins = [
+  'https://rjmusic.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  ...(process.env.ALLOWED_ORIGIN
+    ? process.env.ALLOWED_ORIGIN.split(',').map((o) => o.trim())
+    : []),
+];
 
 app.use(
   cors({

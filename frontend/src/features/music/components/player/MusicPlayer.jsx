@@ -85,7 +85,8 @@ export function MusicPlayer() {
 
   return (
     <>
-
+      {/* Hidden YouTube player element */}
+      <div id="youtube-player" style={{ display: 'none', position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} />
 
       {/* ── FULLSCREEN PLAYER ── */}
       {isExpanded && currentTrack && (

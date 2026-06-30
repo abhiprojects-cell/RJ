@@ -1,14 +1,14 @@
-// usePlayer.js — Playback controls via native HTML5 audio and the backend proxy
+// usePlayer.js — Playback controls via YouTube IFrame API
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMusicState, useMusicDispatch, useMusicAudio } from '../context/MusicContext.jsx';
 import { ACTIONS } from '../utils/constants.js';
-import { getAudioProxyUrl } from '../api/musicApi.js';
 
 export function usePlayer() {
   const state = useMusicState();
   const dispatch = useMusicDispatch();
   const { youtubePlayerRef } = useMusicAudio();
+  const timeUpdateIntervalRef = useRef(null);
   const [playerReady, setPlayerReady] = useState(false);
 
   const {
@@ -24,109 +24,97 @@ export function usePlayer() {
     queueIndex,
   } = state;
 
+  // ── 1. Initialize YouTube IFrame API ─────────────────────────────────────────
   useEffect(() => {
-    if (!currentTrack?.videoId) {
-      setPlayerReady(false);
+    if (window.YT && window.YT.Player) {
+      if (!youtubePlayerRef.current) initPlayer();
       return;
     }
 
-    const audio = document.createElement('audio');
-    audio.preload = 'auto';
-    audio.crossOrigin = 'anonymous';
-    audio.playsInline = true;
-    audio.setAttribute('webkit-playsinline', 'true');
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    const firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
 
-    const playerApi = {
-      seekTo: (time) => {
-        audio.currentTime = Math.max(0, Number(time) || 0);
-      },
-      getCurrentTime: () => audio.currentTime || 0,
-      getDuration: () => audio.duration || 0,
-      mute: () => {
-        audio.muted = true;
-      },
-      unMute: () => {
-        audio.muted = false;
-      },
-      setVolume: (value) => {
-        const normalized = value > 1 ? value / 100 : value;
-        audio.volume = Math.max(0, Math.min(1, normalized || 0));
-      },
-      play: () => audio.play(),
-      pause: () => audio.pause(),
-      load: () => audio.load(),
-      getPlayerState: () => {
-        if (audio.ended) return 0;
-        if (audio.paused) return 2;
-        return 1;
-      },
+    window.onYouTubeIframeAPIReady = () => {
+      initPlayer();
     };
 
-    const handleTimeUpdate = () => {
-      dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: audio.currentTime || 0 } });
-    };
+    function initPlayer() {
+      let checkExist = null;
+      const checkFn = () => {
+        if (document.getElementById('youtube-player')) {
+          if (checkExist) clearInterval(checkExist);
+          checkExist = null;
 
-    const handleDurationChange = () => {
-      if (audio.duration) {
-        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audio.duration } });
+          youtubePlayerRef.current = new window.YT.Player('youtube-player', {
+            height: '0',
+            width: '0',
+            playerVars: {
+              autoplay: 0,
+              controls: 0,
+              disablekb: 1,
+              fs: 0,
+              modestbranding: 1,
+              playsinline: 1,
+            },
+            events: {
+              onReady: (event) => {
+                setPlayerReady(true);
+                event.target.setVolume(isMuted ? 0 : volume * 100);
+              },
+              onStateChange: onPlayerStateChange,
+              onError: onPlayerError,
+            },
+          });
+        }
+      };
+      checkExist = setInterval(checkFn, 100);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 2. Handle YouTube Player State Changes ────────────────────────────────────
+
+  const onPlayerStateChange = useCallback((event) => {
+    const YT = window.YT;
+    if (!YT) return;
+
+    if (event.data === YT.PlayerState.PLAYING) {
+      const dur = event.target.getDuration();
+      if (dur && dur !== state.duration) {
+        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: dur } });
       }
-    };
 
-    const handleLoadedMetadata = () => {
-      setPlayerReady(true);
-      if (audio.duration) {
-        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audio.duration } });
-      }
-    };
+      clearInterval(timeUpdateIntervalRef.current);
+      timeUpdateIntervalRef.current = setInterval(() => {
+        if (youtubePlayerRef.current && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
+          dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: youtubePlayerRef.current.getCurrentTime() } });
+          const currentDur = youtubePlayerRef.current.getDuration();
+          if (currentDur) {
+            dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: currentDur } });
+          }
+        }
+      }, 500);
 
-    const handlePlay = () => {
-      setPlayerReady(true);
-    };
-
-    const handlePause = () => {
-      setPlayerReady(true);
-    };
-
-    const handleEnded = () => {
+    } else if (event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.BUFFERING) {
+      clearInterval(timeUpdateIntervalRef.current);
+    } else if (event.data === YT.PlayerState.ENDED) {
+      clearInterval(timeUpdateIntervalRef.current);
       dispatch({ type: ACTIONS.NEXT_TRACK });
-    };
+    }
+  }, [state.isPlaying, state.duration, dispatch, youtubePlayerRef]);
 
-    const handleError = () => {
-      console.error('[usePlayer] Audio playback error');
+  const onPlayerError = useCallback((event) => {
+    console.error('[usePlayer] YouTube Player Error:', event.data);
+    setTimeout(() => {
       dispatch({ type: ACTIONS.NEXT_TRACK });
-    };
+    }, 1500);
+  }, [dispatch]);
 
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('durationchange', handleDurationChange);
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('play', handlePlay);
-    audio.addEventListener('pause', handlePause);
-    audio.addEventListener('ended', handleEnded);
-    audio.addEventListener('error', handleError);
-
-    audio.src = getAudioProxyUrl(currentTrack.videoId);
-    document.body.appendChild(audio);
-    youtubePlayerRef.current = playerApi;
-    audio.load();
-
-    return () => {
-      audio.pause();
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('durationchange', handleDurationChange);
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('play', handlePlay);
-      audio.removeEventListener('pause', handlePause);
-      audio.removeEventListener('ended', handleEnded);
-      audio.removeEventListener('error', handleError);
-      audio.remove();
-      if (youtubePlayerRef.current === playerApi) {
-        youtubePlayerRef.current = null;
-      }
-    };
-  }, [currentTrack?.videoId, dispatch, youtubePlayerRef]);
-
+  // ── 3. Sync Volume and Mute ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
+    if (!playerReady || !youtubePlayerRef.current) return;
     try {
       if (isMuted) {
         youtubePlayerRef.current.mute();
@@ -135,24 +123,43 @@ export function usePlayer() {
         youtubePlayerRef.current.setVolume(volume * 100);
       }
     } catch (err) {}
-  }, [volume, isMuted, playerReady, currentTrack?.videoId, youtubePlayerRef]);
+  }, [volume, isMuted, playerReady, youtubePlayerRef]);
 
+  // ── 4. Load and Play Track ───────────────────────────────────────────────────
   useEffect(() => {
     if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
 
     try {
       const player = youtubePlayerRef.current;
       if (isPlaying) {
-        const playPromise = player.play();
-        if (playPromise && typeof playPromise.catch === 'function') {
-          playPromise.catch(() => {});
-        }
+        player.loadVideoById(currentTrack.videoId, 0);
       } else {
-        player.pause();
+        player.cueVideoById(currentTrack.videoId, 0);
+      }
+    } catch (err) {
+      console.error('[usePlayer] Failed to load video:', err);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.videoId, playerReady]);
+
+  // ── 5. Sync Play/Pause ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
+
+    try {
+      const player = youtubePlayerRef.current;
+      const playerState = player.getPlayerState ? player.getPlayerState() : -1;
+      const YT = window.YT;
+
+      if (isPlaying && playerState !== YT?.PlayerState.PLAYING && playerState !== YT?.PlayerState.BUFFERING) {
+        player.playVideo();
+      } else if (!isPlaying && playerState === YT?.PlayerState.PLAYING) {
+        player.pauseVideo();
       }
     } catch (err) {}
-  }, [isPlaying, playerReady, currentTrack?.videoId, youtubePlayerRef]);
+  }, [isPlaying, playerReady, currentTrack, youtubePlayerRef]);
 
+  // ── 6. Media Session API ──────────────────────────────────────────────────────
   useEffect(() => {
     if ('mediaSession' in navigator && currentTrack) {
       navigator.mediaSession.metadata = new MediaMetadata({
@@ -186,6 +193,15 @@ export function usePlayer() {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
   }, [isPlaying]);
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      clearInterval(timeUpdateIntervalRef.current);
+    };
+  }, []);
+
+  // ── Controls ───────────────────────────────────────────────────────────────
 
   const play = useCallback((track, queue, queueIndex, context) => {
     dispatch({ type: ACTIONS.PLAY_TRACK, payload: { track, queue, queueIndex, context } });

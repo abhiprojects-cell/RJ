@@ -59,7 +59,10 @@ export const MusicAudioContext = createContext(null);
 export function MusicProvider({ children }) {
   const [state, dispatch] = useReducer(musicReducer, initialState);
   const youtubePlayerRef = useRef(null);
-  const saveIntervalRef = useRef(null);
+  const saveIntervalRef  = useRef(null);
+  // Always-current ref so the save interval doesn't capture stale state
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   // ── Boot: load persisted data ──────────────────────────────────────────────
   useEffect(() => {
@@ -94,19 +97,23 @@ export function MusicProvider({ children }) {
     });
   }, []);
 
-  // ── Save playback position every 5s ────────────────────────────────────────
+  // ── Persist playback position every 10 s ─────────────────────────────────
+  // SET_CURRENT_TIME is already dispatched continuously by the timeupdate event
+  // in usePlayer.js — we only need to persist to localStorage here.
+  // IMPORTANT: deps = [] so the interval is created ONCE, not on every render.
   useEffect(() => {
     saveIntervalRef.current = setInterval(() => {
-      if (youtubePlayerRef.current && state.currentTrack && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
+      const s = stateRef.current;
+      if (youtubePlayerRef.current && s.currentTrack && typeof youtubePlayerRef.current.getCurrentTime === 'function') {
         const time = youtubePlayerRef.current.getCurrentTime();
         if (time > 0) {
-          dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time } });
-          writePlayerState({ ...state, currentTime: time });
+          writePlayerState({ ...s, currentTime: time });
         }
       }
-    }, 5000);
+    }, 10000);
     return () => clearInterval(saveIntervalRef.current);
-  }, [state.currentTrack, state]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Keyboard shortcuts ──────────────────────────────────────────────────────
   useEffect(() => {

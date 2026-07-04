@@ -26,7 +26,8 @@ app.use(
       callback(new Error(`CORS: origin "${origin}" is not allowed`));
     },
     methods: ['GET', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
+    allowedHeaders: ['Content-Type', 'Range'],
+    exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length', 'Content-Type'],
   }),
 );
 app.use(express.json());

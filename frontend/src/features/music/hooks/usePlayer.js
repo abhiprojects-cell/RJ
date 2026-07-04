@@ -1,30 +1,44 @@
 // usePlayer.js — Playback via native HTML5 <audio> + backend yt-dlp proxy
 // Same-IP extraction and delivery means no YouTube IP mismatch / 403.
-// Native <audio> allows background playback on iOS and Android browsers.
+// Native <audio> allows REAL background playback on iOS and Android (like Spotify).
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useMusicState, useMusicDispatch, useMusicAudio } from '../context/MusicContext.jsx';
 import { ACTIONS } from '../utils/constants.js';
 import { getAudioProxyUrl } from '../api/musicApi.js';
 
 // ── Singleton Audio Element ───────────────────────────────────────────────────
-// We use a single persistent audio element to satisfy mobile browser autoplay policies.
-// Recreating the element per-track causes iOS/Android to block playback.
-const audioEl = document.createElement('audio');
-audioEl.preload = 'auto';
-audioEl.playsInline = true;
-audioEl.setAttribute('webkit-playsinline', 'true');
-// We do not append to body immediately here just in case SSR, but since this is React CSR, it's fine.
-if (typeof window !== 'undefined' && !document.getElementById('cea-native-audio')) {
-  audioEl.id = 'cea-native-audio';
-  document.body.appendChild(audioEl);
+// One persistent element to satisfy mobile autoplay policies.
+// Recreating per-track causes iOS/Android to block background playback.
+let audioEl;
+if (typeof window !== 'undefined') {
+  audioEl = document.getElementById('cea-native-audio');
+  if (!audioEl) {
+    audioEl = document.createElement('audio');
+    audioEl.id = 'cea-native-audio';
+    audioEl.preload = 'auto';
+    audioEl.playsInline = true;
+    audioEl.setAttribute('webkit-playsinline', 'true');
+    document.body.appendChild(audioEl);
+  }
 }
 
+// ── Module-level state mirror ─────────────────────────────────────────────────
+// Event handlers (visibilitychange, MediaSession) are registered once and
+// cannot read React state via closures without going stale. We keep a plain
+// object in sync with the latest render so those handlers always see fresh values.
+const liveState = {
+  isPlaying:    false,
+  volume:       0.8,
+  isMuted:      false,
+  currentTrack: null,
+};
+
+// ── usePlayer hook ─────────────────────────────────────────────────────────────
 export function usePlayer() {
-  const state = useMusicState();
+  const state    = useMusicState();
   const dispatch = useMusicDispatch();
   const { youtubePlayerRef } = useMusicAudio();
-  const [playerReady, setPlayerReady] = useState(false);
 
   const {
     currentTrack,
@@ -39,146 +53,255 @@ export function usePlayer() {
     queueIndex,
   } = state;
 
-  // ── 1. Setup Singleton Audio & Listeners ─────────────────────────────────────
+  // Keep the module-level mirror in sync on every render (no overhead)
+  liveState.isPlaying    = isPlaying;
+  liveState.volume       = volume;
+  liveState.isMuted      = isMuted;
+  liveState.currentTrack = currentTrack;
+
+  // ── 1. One-time Setup: attach all audio event listeners ──────────────────
   useEffect(() => {
-    // Expose API
+    // Expose a player API on the shared ref so MusicContext keyboard shortcuts work
     const playerApi = {
       seekTo:         (t) => { audioEl.currentTime = Math.max(0, Number(t) || 0); },
       getCurrentTime: () => audioEl.currentTime || 0,
-      getDuration:    () => audioEl.duration || 0,
-      mute:           () => { audioEl.muted = true; },
+      getDuration:    () => audioEl.duration    || 0,
+      mute:           () => { audioEl.muted = true;  },
       unMute:         () => { audioEl.muted = false; },
       setVolume:      (v) => { audioEl.volume = Math.max(0, Math.min(1, v > 1 ? v / 100 : v)); },
       play:           () => audioEl.play(),
       pause:          () => audioEl.pause(),
-      getPlayerState: () => audioEl.ended ? 0 : audioEl.paused ? 2 : 1,
+      getPlayerState: () => (audioEl.ended ? 0 : audioEl.paused ? 2 : 1),
     };
     youtubePlayerRef.current = playerApi;
 
-    const onTimeUpdate    = () => dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: audioEl.currentTime || 0 } });
-    const onDuration      = () => { if (audioEl.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audioEl.duration } }); };
-    const onLoadedMeta    = () => { setPlayerReady(true); if (audioEl.duration) dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audioEl.duration } }); };
-    const onCanPlay       = () => setPlayerReady(true);
-    const onEnded         = () => dispatch({ type: ACTIONS.NEXT_TRACK });
-    const onError         = (e) => { 
-      // Ignored if src is empty
-      if (!audioEl.src || audioEl.src.endsWith('undefined')) return;
-      console.error('[usePlayer] audio error', e); 
-      dispatch({ type: ACTIONS.NEXT_TRACK }); 
+    // timeupdate — update UI progress + lock-screen position state
+    const onTimeUpdate = () => {
+      const time = audioEl.currentTime || 0;
+      dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time } });
+
+      // setPositionState is CRITICAL for the lock-screen / notification timeline.
+      // Without it the lock screen shows a static bar with no seek control.
+      if ('mediaSession' in navigator && audioEl.duration && !isNaN(audioEl.duration)) {
+        try {
+          navigator.mediaSession.setPositionState({
+            duration:     audioEl.duration,
+            playbackRate: audioEl.playbackRate || 1,
+            position:     Math.min(time, audioEl.duration),
+          });
+        } catch (_) {}
+      }
+    };
+
+    const onDurationChange = () => {
+      if (audioEl.duration && !isNaN(audioEl.duration)) {
+        dispatch({ type: ACTIONS.SET_DURATION, payload: { duration: audioEl.duration } });
+      }
+    };
+
+    // ended — advance queue
+    const onEnded = () => dispatch({ type: ACTIONS.NEXT_TRACK });
+
+    // error — skip to next (don't block the queue)
+    const onError = () => {
+      if (!audioEl.src || audioEl.src === window.location.href) return;
+      console.warn('[usePlayer] audio error — skipping track');
+      dispatch({ type: ACTIONS.NEXT_TRACK });
+    };
+
+    // visibilitychange — some browsers (especially iOS Safari) pause audio
+    // when the tab goes to background. We resume it if the state says playing.
+    const onVisibilityChange = () => {
+      if (
+        document.visibilityState === 'visible' &&
+        liveState.isPlaying &&
+        audioEl.paused &&
+        audioEl.src &&
+        audioEl.src !== window.location.href
+      ) {
+        const p = audioEl.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
     };
 
     audioEl.addEventListener('timeupdate',     onTimeUpdate);
-    audioEl.addEventListener('durationchange', onDuration);
-    audioEl.addEventListener('loadedmetadata', onLoadedMeta);
-    audioEl.addEventListener('canplay',        onCanPlay);
+    audioEl.addEventListener('durationchange', onDurationChange);
+    audioEl.addEventListener('loadedmetadata', onDurationChange);
     audioEl.addEventListener('ended',          onEnded);
     audioEl.addEventListener('error',          onError);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       audioEl.removeEventListener('timeupdate',     onTimeUpdate);
-      audioEl.removeEventListener('durationchange', onDuration);
-      audioEl.removeEventListener('loadedmetadata', onLoadedMeta);
-      audioEl.removeEventListener('canplay',        onCanPlay);
+      audioEl.removeEventListener('durationchange', onDurationChange);
+      audioEl.removeEventListener('loadedmetadata', onDurationChange);
       audioEl.removeEventListener('ended',          onEnded);
       audioEl.removeEventListener('error',          onError);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       if (youtubePlayerRef.current === playerApi) youtubePlayerRef.current = null;
     };
   }, [dispatch, youtubePlayerRef]);
 
-  // ── 1.5. Update src on track change ──────────────────────────────────────────
+  // ── 2. Track change — swap src and auto-play ──────────────────────────────
   useEffect(() => {
     if (!currentTrack?.videoId) {
-      setPlayerReady(false);
       audioEl.removeAttribute('src');
       audioEl.load();
       return;
     }
 
-    setPlayerReady(false);
-    audioEl.src = getAudioProxyUrl(currentTrack.videoId);
-    audioEl.load();
-    
-    if (isPlaying) {
-      const p = audioEl.play();
-      if (p && typeof p.catch === 'function') p.catch(() => {});
+    const proxyUrl = getAudioProxyUrl(currentTrack.videoId);
+
+    // Skip if already on this track (avoids reloading on unrelated re-renders)
+    if (audioEl.src === proxyUrl) {
+      if (liveState.isPlaying && audioEl.paused) {
+        const p = audioEl.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+      return;
     }
+
+    audioEl.src = proxyUrl;
+    audioEl.load();
+
+    // Auto-play immediately — the browser queues this until enough data loads.
+    // This fires on every PLAY_TRACK dispatch so isPlaying will be true.
+    const p = audioEl.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch((err) => {
+        console.warn('[usePlayer] play() blocked by browser:', err.name, err.message);
+        // If the browser blocked autoplay (first visit, no gesture), reflect in state
+        if (err.name === 'NotAllowedError') {
+          dispatch({ type: ACTIONS.PAUSE });
+        }
+      });
+    }
+  // We intentionally exclude isPlaying — track changes always auto-play.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack?.videoId]);
 
-  // ── 2. Sync volume / mute ────────────────────────────────────────────────────
+  // ── 3. Play / Pause sync ──────────────────────────────────────────────────
+  // Handles manual pause/resume without a track change.
   useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current) return;
-    try {
-      if (isMuted) {
-        youtubePlayerRef.current.mute();
-      } else {
-        youtubePlayerRef.current.unMute();
-        youtubePlayerRef.current.setVolume(volume);
-      }
-    } catch (_) {}
-  }, [volume, isMuted, playerReady, youtubePlayerRef]);
+    if (!currentTrack?.videoId) return;
 
-  // ── 3. Sync play / pause ─────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!playerReady || !youtubePlayerRef.current || !currentTrack) return;
-    try {
-      if (isPlaying) {
-        const p = youtubePlayerRef.current.play();
+    if (isPlaying) {
+      if (audioEl.paused) {
+        const p = audioEl.play();
         if (p && typeof p.catch === 'function') {
           p.catch((err) => {
-             console.warn('Playback prevented:', err);
-             // If browser blocked it, we must pause state visually
-             if (err.name === 'NotAllowedError') {
-                dispatch({ type: ACTIONS.PAUSE });
-             }
+            if (err.name === 'NotAllowedError') dispatch({ type: ACTIONS.PAUSE });
           });
         }
+      }
+    } else {
+      if (!audioEl.paused) audioEl.pause();
+    }
+  }, [isPlaying, currentTrack?.videoId, dispatch]);
+
+  // ── 4. Volume / Mute sync ─────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      if (isMuted) {
+        audioEl.muted = true;
       } else {
-        youtubePlayerRef.current.pause();
+        audioEl.muted  = false;
+        audioEl.volume = Math.max(0, Math.min(1, volume));
       }
     } catch (_) {}
-  }, [isPlaying, playerReady, currentTrack?.videoId, youtubePlayerRef, dispatch]);
+  }, [volume, isMuted]);
 
-  // ── 4. MediaSession API (lock-screen / notification controls) ─────────────────
+  // ── 5. MediaSession API — full Spotify-like lock-screen controls ──────────
   useEffect(() => {
     if (!('mediaSession' in navigator) || !currentTrack) return;
 
     navigator.mediaSession.metadata = new MediaMetadata({
-      title:   currentTrack.title,
+      title:   currentTrack.title  || 'Unknown',
       artist:  currentTrack.artist || currentTrack.channelTitle || 'Unknown Artist',
-      album:   'CEA Music',
+      album:   'RJ Music',
       artwork: [
         {
-          src:   currentTrack.thumbnail || `https://i.ytimg.com/vi/${currentTrack.videoId}/hqdefault.jpg`,
+          src:   currentTrack.thumbnail ||
+                 `https://i.ytimg.com/vi/${currentTrack.videoId}/hqdefault.jpg`,
           sizes: '512x512',
           type:  'image/jpeg',
         },
       ],
     });
 
-    navigator.mediaSession.setActionHandler('play',          () => dispatch({ type: ACTIONS.RESUME }));
-    navigator.mediaSession.setActionHandler('pause',         () => dispatch({ type: ACTIONS.PAUSE }));
-    navigator.mediaSession.setActionHandler('previoustrack', () => dispatch({ type: ACTIONS.PREV_TRACK }));
-    navigator.mediaSession.setActionHandler('nexttrack',     () => dispatch({ type: ACTIONS.NEXT_TRACK }));
+    // Helper: seek by offset (headphones, car controls, Bluetooth)
+    const seekBy = (offsetSec) => {
+      const t = Math.max(0, Math.min(audioEl.duration || 0, audioEl.currentTime + offsetSec));
+      audioEl.currentTime = t;
+      dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: t } });
+    };
+
+    navigator.mediaSession.setActionHandler('play', () => {
+      const p = audioEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      dispatch({ type: ACTIONS.RESUME });
+    });
+
+    navigator.mediaSession.setActionHandler('pause', () => {
+      audioEl.pause();
+      dispatch({ type: ACTIONS.PAUSE });
+    });
+
+    navigator.mediaSession.setActionHandler('stop', () => {
+      audioEl.pause();
+      dispatch({ type: ACTIONS.PAUSE });
+    });
+
+    navigator.mediaSession.setActionHandler('previoustrack', () =>
+      dispatch({ type: ACTIONS.PREV_TRACK }),
+    );
+
+    navigator.mediaSession.setActionHandler('nexttrack', () =>
+      dispatch({ type: ACTIONS.NEXT_TRACK }),
+    );
+
+    // seekbackward/seekforward: required for headphones (AirPods, earbuds, car).
+    // Without these, the OS falls back to skipping tracks on double-press.
+    navigator.mediaSession.setActionHandler('seekbackward', (details) =>
+      seekBy(-(details?.seekOffset ?? 10)),
+    );
+
+    navigator.mediaSession.setActionHandler('seekforward', (details) =>
+      seekBy(details?.seekOffset ?? 10),
+    );
+
+    // seekto: dragging the lock-screen / notification progress bar
     navigator.mediaSession.setActionHandler('seekto', (details) => {
-      if (youtubePlayerRef.current) {
-        youtubePlayerRef.current.seekTo(details.seekTime);
+      if (details.seekTime !== undefined) {
+        audioEl.currentTime = details.seekTime;
         dispatch({ type: ACTIONS.SET_CURRENT_TIME, payload: { time: details.seekTime } });
       }
     });
-  }, [currentTrack, dispatch, youtubePlayerRef]);
 
-  // Sync OS playback state badge (play/pause indicator on lock screen)
+    return () => {
+      [
+        'play','pause','stop',
+        'previoustrack','nexttrack',
+        'seekbackward','seekforward','seekto',
+      ].forEach((action) => {
+        try { navigator.mediaSession.setActionHandler(action, null); } catch (_) {}
+      });
+    };
+  }, [currentTrack, dispatch]);
+
+  // ── 6. Sync OS play/pause badge ───────────────────────────────────────────
   useEffect(() => {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
   }, [isPlaying]);
 
-  // ── Controls (dispatch to reducer; effects above react and drive the audio) ───
+  // ── Controls (called by UI components) ────────────────────────────────────
+  // All controls dispatch to the reducer; effects above react to state changes.
+
   const play = useCallback((track, queue, queueIndex, context) => {
-    // Attempt to unlock audio synchronously on user interaction
-    if (audioEl.paused) {
+    // Unlock audio context synchronously on user gesture (required by iOS)
+    if (audioEl.paused && audioEl.src) {
       const p = audioEl.play();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
@@ -208,19 +331,22 @@ export function usePlayer() {
   }, [isPlaying, dispatch]);
 
   const seek = useCallback((time) => {
-    if (youtubePlayerRef.current) youtubePlayerRef.current.seekTo(time);
+    audioEl.currentTime = Math.max(0, Number(time) || 0);
     dispatch({ type: ACTIONS.SEEK, payload: { time } });
-  }, [youtubePlayerRef, dispatch]);
-
-  const setVolume = useCallback((vol) => {
-    dispatch({ type: ACTIONS.SET_VOLUME, payload: { volume: Math.max(0, Math.min(1, vol)) } });
   }, [dispatch]);
 
-  const toggleMute     = useCallback(() => dispatch({ type: ACTIONS.TOGGLE_MUTE }), [dispatch]);
-  const next           = useCallback(() => dispatch({ type: ACTIONS.NEXT_TRACK }),  [dispatch]);
-  const prev           = useCallback(() => dispatch({ type: ACTIONS.PREV_TRACK }),  [dispatch]);
-  const toggleShuffle  = useCallback(() => dispatch({ type: ACTIONS.TOGGLE_SHUFFLE }), [dispatch]);
-  const cycleRepeat    = useCallback(() => dispatch({ type: ACTIONS.CYCLE_REPEAT }),   [dispatch]);
+  const setVolume = useCallback((vol) => {
+    dispatch({
+      type: ACTIONS.SET_VOLUME,
+      payload: { volume: Math.max(0, Math.min(1, vol)) },
+    });
+  }, [dispatch]);
+
+  const toggleMute    = useCallback(() => dispatch({ type: ACTIONS.TOGGLE_MUTE }),    [dispatch]);
+  const next          = useCallback(() => dispatch({ type: ACTIONS.NEXT_TRACK }),      [dispatch]);
+  const prev          = useCallback(() => dispatch({ type: ACTIONS.PREV_TRACK }),      [dispatch]);
+  const toggleShuffle = useCallback(() => dispatch({ type: ACTIONS.TOGGLE_SHUFFLE }), [dispatch]);
+  const cycleRepeat   = useCallback(() => dispatch({ type: ACTIONS.CYCLE_REPEAT }),   [dispatch]);
 
   const playQueue = useCallback((tracks, startIndex = 0, context = null) => {
     if (!tracks.length) return;

@@ -196,6 +196,9 @@ export async function audio(req, res) {
     // Set appropriate response headers
     const status = rangeHeader && upstreamRes.status === 206 ? 206 : 200;
     res.status(status);
+    // Allow cross-origin <audio> elements to load this resource (required for
+    // MediaSession seekto to work when frontend and backend are on different origins)
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Content-Type', format || 'audio/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'public, max-age=300');

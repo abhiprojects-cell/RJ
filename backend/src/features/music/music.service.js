@@ -92,7 +92,8 @@ export async function searchYouTube(query) {
 }
 
 export async function getTrending() {
-  return searchYouTube('trending music hits 2024');
+  const year = new Date().getFullYear();
+  return searchYouTube(`popular music hits ${year} top songs`);
 }
 
 // ── Suggestions (Google autocomplete — no yt-dlp needed, always fast) ─────────

@@ -199,6 +199,24 @@ export function usePlayer() {
     }
   }, [isPlaying, currentTrack?.videoId, dispatch]);
 
+  // ── 3b. Handle PREV_TRACK "restart current track" case ────────────────────
+  // When the reducer returns currentTime=0 for the SAME track (user pressed prev
+  // while >3s in), we need to actually seek the audio element to the beginning.
+  const prevTrackRef = useRef(null);
+  useEffect(() => {
+    const prevVideo = prevTrackRef.current;
+    prevTrackRef.current = currentTrack?.videoId || null;
+    // Only seek when: same track, currentTime just became 0, and audio is past 1s
+    if (
+      currentTrack?.videoId &&
+      currentTrack.videoId === prevVideo &&
+      currentTime === 0 &&
+      audioEl.currentTime > 1
+    ) {
+      audioEl.currentTime = 0;
+    }
+  }, [currentTime, currentTrack?.videoId]);
+
   // ── 4. Volume / Mute sync ─────────────────────────────────────────────────
   useEffect(() => {
     try {

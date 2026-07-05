@@ -3,7 +3,7 @@ import { useQueue } from '../../hooks/useQueue.js';
 import { usePlayer } from '../../hooks/usePlayer.js';
 
 export function QueuePanel({ onClose }) {
-  const { queue, upcomingTracks, removeFromQueue, clearQueue, playingContext } = useQueue();
+  const { queue, queueIndex, upcomingTracks, removeFromQueue, clearQueue, playingContext } = useQueue();
   const { currentTrack } = usePlayer();
   const [translateX, setTranslateX] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
@@ -109,7 +109,7 @@ export function QueuePanel({ onClose }) {
                 </div>
                 <button
                   className="music-queue-item-remove"
-                  onClick={() => removeFromQueue(idx)}
+                  onClick={() => removeFromQueue(queueIndex + 1 + idx)}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', font: 'inherit' }}
                   title="Remove from queue"
                 >
